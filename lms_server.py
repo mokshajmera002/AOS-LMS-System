@@ -17,7 +17,7 @@ DATABASE = 'LMS_DATABASE.db'
 JWT_SECRET = 'software_project_management'
 JWT_ALGORITHM = 'HS256'
 
-class LMSNewService(lms_pb2_grpc.LMS_NEWServicer):
+class LMSService(lms_pb2_grpc.LMSServicer):
     def __init__(self):
         self.conn = sqlite3.connect(DATABASE, check_same_thread=False)
         self.create_tables()
@@ -555,7 +555,7 @@ class LMSNewService(lms_pb2_grpc.LMS_NEWServicer):
 
 def serve():
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
-    lms_pb2_grpc.add_LMS_NEWServicer_to_server(LMSNewService(), server)
+    lms_pb2_grpc.add_LMSServicer_to_server(LMSService(), server)
     server.add_insecure_port('[::]:50051')
     server.start()
     print('Server started at port 50051')

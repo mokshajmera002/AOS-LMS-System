@@ -162,7 +162,7 @@ message ReplyList {
     repeated Reply replies = 1;
 }
 
-service LMS_NEW{
+service LMS{
     rpc Login (LoginRequest) returns (LoginResponse);
     rpc CreateUser (UserRequest) returns (UserResponse);
     rpc ListUsers (Empty) returns (UserList);
