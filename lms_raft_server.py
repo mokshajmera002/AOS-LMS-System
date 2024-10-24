@@ -34,6 +34,9 @@ class LMSService(lms_pb2_grpc.LMSServicer):
         self.create_default_admin()
         self.llm_server = llm_address
         
+        
+
+
 
     def create_tables(self):
         cursor = self.conn.cursor()
@@ -427,23 +430,43 @@ class LMSService(lms_pb2_grpc.LMSServicer):
 
         llm_response = ''
         if request.target == lms_pb2.LLM:
-            llm_response = self.generate_llm_response(request.content)
-
-        cursor.execute(
-            'INSERT INTO queries (student_id, content, timestamp, target, llm_response) VALUES (?, ?, ?, ?, ?)',
-            (payload['user_id'], request.content, timestamp, request.target, llm_response)
-        )
-        self.conn.commit()
-        query_id = cursor.lastrowid
-        query = lms_pb2.Query(
-            id=query_id,
-            student_id=payload['user_id'],
-            content=request.content,
-            timestamp=timestamp,
-            target=request.target,
-            llm_response=llm_response
-        )
-        return query
+            # Insert with a placeholder response
+            llm_response = 'LLM response pending...'
+            cursor.execute(
+                'INSERT INTO queries (student_id, content, timestamp, target, llm_response) VALUES (?, ?, ?, ?, ?)',
+                (payload['user_id'], request.content, timestamp, request.target, llm_response)
+            )
+            self.conn.commit()
+            query_id = cursor.lastrowid
+            # Start background thread to generate and update LLM response
+            threading.Thread(target=self.generate_and_update_llm_response, args=(query_id, request.content), daemon=True).start()
+            # Return immediate confirmation to the client
+            query = lms_pb2.Query(
+                id=query_id,
+                student_id=payload['user_id'],
+                content=request.content,
+                timestamp=timestamp,
+                target=request.target,
+                llm_response=llm_response
+            )
+            return query
+        else:
+            # Handle non-LLM queries as usual
+            cursor.execute(
+                'INSERT INTO queries (student_id, content, timestamp, target, llm_response) VALUES (?, ?, ?, ?, ?)',
+                (payload['user_id'], request.content, timestamp, request.target, llm_response)
+            )
+            self.conn.commit()
+            query_id = cursor.lastrowid
+            query = lms_pb2.Query(
+                id=query_id,
+                student_id=payload['user_id'],
+                content=request.content,
+                timestamp=timestamp,
+                target=request.target,
+                llm_response=llm_response
+            )
+            return query
 
     def GetQueries(self, request, context):
         payload = self.authenticate(context)
@@ -541,6 +564,7 @@ class LMSService(lms_pb2_grpc.LMSServicer):
                 post_id=row[1],
                 student_id=row[2],
                 filename=row[3],
+                content=row[4],
                 timestamp=row[5],
                 grade=row[6],
                 feedback=row[7]
@@ -572,6 +596,7 @@ class LMSService(lms_pb2_grpc.LMSServicer):
                 post_id=row[1],
                 student_id=row[2],
                 filename=row[3],
+                content=row[4],
                 timestamp=row[5],
                 grade=row[6] if row[6] is not None else 0.0,
                 feedback=row[7] if row[7] else ''
@@ -579,17 +604,32 @@ class LMSService(lms_pb2_grpc.LMSServicer):
             solutions.append(solution)
         return lms_pb2.SolutionList(solutions=solutions)
     
-    def generate_llm_response(self, content):
-        response = "This is a simulated response from the LLM for your query: " + content
-        if self.llm_server:
-            with grpc.insecure_channel(self.llm_server) as channel:
-                llm_stub = llm_server_pb2_grpc.LLMChatStub(channel)
-                query = llm_server_pb2.QueryRequest(
-                    query_id = 1,
-                    message = content
-                )
-                response = llm_stub.Query(query)
-        return response
+    def generate_llm_response(self, query_id, content):
+        try:
+            response = "This is a simulated response from the LLM for your query: " + content
+            if self.llm_server:
+                with grpc.insecure_channel(self.llm_server) as channel:
+                    llm_stub = llm_server_pb2_grpc.LLMChatStub(channel)
+                    query = llm_server_pb2.QueryRequest(
+                        query_id=query_id,
+                        message=content
+                    )
+                    response = llm_stub.Query(query).message
+            return response
+        except Exception as e:
+            print(f"Error communicating with LLM server: {e}")
+            return "Failed to generate LLM response."
+
+    def generate_and_update_llm_response(self, query_id, content):
+        llm_response = self.generate_llm_response(query_id, content)
+        print(f"----- Completed {query_id}------")
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute('UPDATE queries SET llm_response=? WHERE id=?', (llm_response, query_id))
+            self.conn.commit()
+            print(f"LLM response for Query ID {query_id} has been generated and updated.")
+        except Exception as e:
+            print(f"Error updating LLM response for Query ID {query_id}: {e}")
 
 class RaftServer():
     def __init__(self, sid, self_address, peer_addresses, llm_address):
@@ -943,7 +983,7 @@ class RaftService(raft_pb2_grpc.RaftServicer):
                 response = raft_pb2.ClientResponseMessage(
                     success=False,
                     message="Not the leader",
-                    leaderId=self.server.leaderId if self.server.leaderId is not None else ""
+                    leaderId=str(self.server.leaderId) if self.server.leaderId else ""
                 )
                 print(f"Server {self.server.sid} is not the leader. Redirecting to {self.server.leaderId}")
                 return response
