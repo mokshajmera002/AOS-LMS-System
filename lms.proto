@@ -1,0 +1,186 @@
+syntax = "proto3";
+
+package lms_new;
+
+enum PostType {
+    ASSIGNMENT = 0;
+    COURSE_MATERIAL = 1;
+    ANNOUNCEMENT = 2;
+}
+
+enum UserRole {
+    STUDENT = 0;
+    INSTRUCTOR = 1;
+    ADMIN = 2;
+}
+
+enum QueryTarget {
+    PROFESSOR = 0;
+    LLM = 1;
+}
+
+message User {
+    int32 id = 1;
+    string username = 2;
+    UserRole role = 3;
+}
+
+message LoginRequest {
+    string username = 1;
+    string password = 2;
+}
+
+message LoginResponse {
+    string token = 1;
+}
+
+message UserRequest {
+    string username = 1;
+    string password = 2;
+    UserRole role = 3;
+}
+
+message UserResponse {
+    User user = 1;
+}
+
+message UserList {
+    repeated User users = 1;
+}
+
+message Post {
+    int32 id = 1;
+    string title = 2;
+    string description = 3;
+    PostType type = 4;
+    string filename = 5;
+    bytes content = 6;
+    string timestamp = 7;
+}
+
+message PostRequest {
+    string title = 1;
+    string description = 2;
+    PostType type = 3;
+    string filename = 4;
+    bytes content = 5;
+}
+
+message PostResponse {
+    Post post = 1;
+}
+
+message Empty {}
+
+message PostList {
+    repeated Post posts = 1;
+}
+
+message PostId {
+    int32 id = 1;
+}
+
+message Solution {
+    int32 id = 1;
+    int32 post_id = 2;
+    int32 student_id = 3;
+    string filename = 4;
+    bytes content = 5;
+    string timestamp = 6;
+    float grade = 7;
+    string feedback = 8;
+}
+
+message SolutionRequest {
+    int32 post_id = 1;
+    int32 student_id = 2;
+    string filename = 3;
+    bytes content = 4;
+}
+
+message SolutionResponse {
+    Solution solution = 1;
+}
+
+message SolutionList {
+    repeated Solution solutions = 1;
+}
+
+message GradeRequest {
+    int32 solution_id = 1;
+    float grade = 2;
+}
+
+message FeedbackRequest {
+    int32 solution_id = 1;
+    string feedback = 2;
+}
+
+message StudentId {
+    int32 id = 1;
+}
+
+message Query {
+    int32 id = 1;
+    int32 student_id = 2;
+    string content = 3;
+    string timestamp = 4;
+    QueryTarget target = 5;
+    string llm_response = 6;
+}
+
+message QueryRequest {
+    int32 student_id = 1;
+    string content = 2;
+    QueryTarget target = 3;
+}
+
+message QueryList {
+    repeated Query queries = 1;
+}
+
+message QueryId {
+    int32 id = 1;
+}
+
+message Reply {
+    int32 id = 1;
+    int32 query_id = 2;
+    int32 user_id = 3;
+    string content = 4;
+    string timestamp = 5;
+    optional string username = 6;
+}
+
+message ReplyRequest {
+    int32 query_id = 1;
+    int32 user_id = 2;
+    string content = 3;
+}
+
+message ReplyList {
+    repeated Reply replies = 1;
+}
+
+service LMS_NEW{
+    rpc Login (LoginRequest) returns (LoginResponse);
+    rpc CreateUser (UserRequest) returns (UserResponse);
+    rpc ListUsers (Empty) returns (UserList);
+
+    rpc PostContent (PostRequest) returns (PostResponse);
+    rpc GetPosts (Empty) returns (PostList);
+    rpc DownloadPost (PostId) returns (PostResponse);
+
+    rpc UploadSolution (SolutionRequest) returns (SolutionResponse);
+    rpc GetSolutions (PostId) returns (SolutionList);
+    rpc DownloadSolution (PostId) returns (SolutionResponse);
+    rpc AssignGrade (GradeRequest) returns (SolutionResponse);
+    rpc ViewGrades (StudentId) returns (SolutionList);
+    rpc GetAllGrades (Empty) returns (SolutionList);
+    rpc AddFeedback (FeedbackRequest) returns (SolutionResponse);
+
+    rpc PostQuery (QueryRequest) returns (Query);
+    rpc GetQueries (Empty) returns (QueryList);
+    rpc PostReply (ReplyRequest) returns (Reply);
+    rpc GetReplies (QueryId) returns (ReplyList);
+}
