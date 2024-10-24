@@ -11,117 +11,10 @@ import signal
 import pickle
 import os
 
-class RaftService(raft_pb2_grpc.RaftServicer):
-    def __init__(self, server):
-        self.server = server
-
-    def AppendEntries(self, request, context):
-        with self.server.lock:
-            print(f"Server {self.server.sid} received AppendEntries from Leader {request.leaderId} with term {request.term}")
-            response = raft_pb2.AppendEntriesResponse()
-            if request.term < self.server.currentTerm:
-                response.term = self.server.currentTerm
-                response.success = False
-                return response
-
-            if request.term > self.server.currentTerm:
-                self.server.currentTerm = request.term
-                self.server.votedFor = None
-                self.server.save_state()
-
-            self.server.state = 'follower'
-            self.server.leaderId = request.leaderId
-            self.server.election_reset_event.set()
-
-            # Log consistency check
-            if request.prevLogIndex > 0:
-                if len(self.server.log) < request.prevLogIndex:
-                    response.term = self.server.currentTerm
-                    response.success = False
-                    return response
-                elif self.server.log[request.prevLogIndex - 1]['term'] != request.prevLogTerm:
-                    # Conflict detected
-                    self.server.log = self.server.log[:request.prevLogIndex - 1]
-                    self.server.save_state()
-                    response.term = self.server.currentTerm
-                    response.success = False
-                    return response
-
-            # Append new entries
-            for i, entry in enumerate(request.entries):
-                index = request.prevLogIndex + i + 1
-                if len(self.server.log) >= index:
-                    if self.server.log[index - 1]['term'] != entry.term:
-                        # Conflict detected, delete the entry and all that follow
-                        self.server.log = self.server.log[:index - 1]
-                        self.server.log.append({'term': entry.term, 'command': entry.command})
-                else:
-                    self.server.log.append({'term': entry.term, 'command': entry.command})
-            self.server.save_state()
-
-            # Update commit index
-            if request.leaderCommit > self.server.commitIndex:
-                self.server.commitIndex = min(request.leaderCommit, len(self.server.log))
-                # Apply committed entries to state machine
-                self.server.apply_entries()
-
-            response.term = self.server.currentTerm
-            response.success = True
-            return response
-
-    def RequestVote(self, request, context):
-        with self.server.lock:
-            print(f"Server {self.server.sid} received RequestVote from Candidate {request.candidateId} with term {request.term}")
-            response = raft_pb2.RequestVoteResponse()
-            response.term = self.server.currentTerm
-
-            if request.term < self.server.currentTerm:
-                response.voteGranted = False
-            else:
-                if (self.server.votedFor is None or self.server.votedFor == request.candidateId) and \
-                   (request.lastLogTerm > self.server.get_last_log_term() or
-                   (request.lastLogTerm == self.server.get_last_log_term() and
-                    request.lastLogIndex >= self.server.get_last_log_index())):
-                    self.server.votedFor = request.candidateId
-                    self.server.currentTerm = request.term
-                    self.server.save_state()
-                    response.voteGranted = True
-                else:
-                    response.voteGranted = False
-
-            return response
-
-    def ClientRequest(self, request, context):
-        with self.server.lock:
-            if self.server.state != 'leader':
-                # Not the leader, return redirect
-                response = raft_pb2.ClientResponseMessage(
-                    success=False,
-                    message="Not the leader",
-                    leaderId=f"127.0.0.1:5000{self.server.leaderId}" if self.server.leaderId is not None else ""
-                )
-                print(f"Server {self.server.sid} is not the leader. Redirecting to {self.server.leaderId}")
-                return response
-            else:
-                # Leader: Append the command to the log and start replication
-                print(f"Leader {self.server.sid} received ClientRequest with command: {request.command}")
-                entry = {'term': self.server.currentTerm, 'command': request.command}
-                self.server.log.append(entry)
-                self.server.save_state()
-                # Start replication (send AppendEntries to followers)
-                self.server.send_append_entries()
-                response = raft_pb2.ClientResponseMessage(
-                    success=True,
-                    message="Command accepted",
-                    leaderId=""
-                )
-                return response
-
 class RaftServer():
-    def __init__(self, sid=0, n_servers=3):
+    def __init__(self, sid, self_address, peer_addresses):
         self.sid = int(sid)
-        self.n_servers = n_servers
-        self.socket_address = f"127.0.0.1:5000{self.sid}"
+        self.socket_address = self_address
         self.server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
         raft_pb2_grpc.add_RaftServicer_to_server(RaftService(self), self.server)
         self.server.add_insecure_port(self.socket_address)
@@ -131,7 +24,7 @@ class RaftServer():
         self.votedFor = None
         self.state = 'follower'
         self.leaderId = None
-        self.peers = [f"127.0.0.1:5000{i}" for i in range(self.n_servers) if i != self.sid]
+        self.peers = [addr for addr in peer_addresses if addr != self.socket_address]
 
         # Log and State Machine
         self.log = []  # List of log entries
@@ -260,12 +153,13 @@ class RaftServer():
                         lastLogTerm=self.get_last_log_term(),
                     )
                 try:
-                    response = stub.RequestVote(request, timeout=1)
+                    #This also helps in getting elected faster
+                    response = stub.RequestVote(request, timeout=random.uniform(0.8, 2.5))
                     with self.lock:
                         if response.voteGranted:
                             with vote_lock:
                                 votes[0] += 1
-                                if votes[0] > self.n_servers // 2 and self.state == 'candidate':
+                                if votes[0] > (len(self.peers) + 1) // 2 and self.state == 'candidate':
                                     print(f"Candidate {self.sid} won the election with {votes[0]} votes.")
                                     self.state = 'leader'
                                     self.leaderId = self.sid
@@ -306,7 +200,7 @@ class RaftServer():
             for peer in self.peers:
                 if self.matchIndex.get(peer, 0) >= N:
                     count += 1
-            if count > self.n_servers // 2 and self.log[N - 1]['term'] == self.currentTerm:
+            if count > (len(self.peers) + 1) // 2 and self.log[N - 1]['term'] == self.currentTerm:
                 self.commitIndex = N
                 self.apply_entries()
             else:
@@ -369,8 +263,115 @@ class RaftServer():
         self.server.stop(0)  # Stops the server immediately
         sys.exit(0)
 
-def run_server(sid: str = 0, n_servers: int = 3):
-    server = RaftServer(sid, n_servers)
+class RaftService(raft_pb2_grpc.RaftServicer):
+    def __init__(self, server: RaftServer):
+        self.server = server
+
+    def AppendEntries(self, request, context):
+        with self.server.lock:
+            print(f"Server {self.server.sid} received AppendEntries from Leader {request.leaderId} with term {request.term}")
+            response = raft_pb2.AppendEntriesResponse()
+            if request.term < self.server.currentTerm:
+                response.term = self.server.currentTerm
+                response.success = False
+                return response
+
+            if request.term > self.server.currentTerm:
+                self.server.currentTerm = request.term
+                self.server.votedFor = None
+                self.server.save_state()
+
+            self.server.state = 'follower'
+            self.server.leaderId = request.leaderId
+            self.server.election_reset_event.set()
+
+            # Log consistency check
+            if request.prevLogIndex > 0:
+                if len(self.server.log) < request.prevLogIndex:
+                    response.term = self.server.currentTerm
+                    response.success = False
+                    return response
+                elif self.server.log[request.prevLogIndex - 1]['term'] != request.prevLogTerm:
+                    # Conflict detected
+                    self.server.log = self.server.log[:request.prevLogIndex - 1]
+                    self.server.save_state()
+                    response.term = self.server.currentTerm
+                    response.success = False
+                    return response
+
+            # Append new entries
+            for i, entry in enumerate(request.entries):
+                index = request.prevLogIndex + i + 1
+                if len(self.server.log) >= index:
+                    if self.server.log[index - 1]['term'] != entry.term:
+                        # Conflict detected, delete the entry and all that follow
+                        self.server.log = self.server.log[:index - 1]
+                        self.server.log.append({'term': entry.term, 'command': entry.command})
+                else:
+                    self.server.log.append({'term': entry.term, 'command': entry.command})
+            self.server.save_state()
+
+            # Update commit index
+            if request.leaderCommit > self.server.commitIndex:
+                self.server.commitIndex = min(request.leaderCommit, len(self.server.log))
+                # Apply committed entries to state machine
+                self.server.apply_entries()
+
+            response.term = self.server.currentTerm
+            response.success = True
+            return response
+
+    def RequestVote(self, request, context):
+        with self.server.lock:
+            print(f"Server {self.server.sid} received RequestVote from Candidate {request.candidateId} with term {request.term}")
+            response = raft_pb2.RequestVoteResponse()
+            response.term = self.server.currentTerm
+
+            if request.term < self.server.currentTerm:
+                response.voteGranted = False
+            else:
+                if (self.server.votedFor is None or self.server.votedFor == request.candidateId) and \
+                   (request.lastLogTerm > self.server.get_last_log_term() or
+                   (request.lastLogTerm == self.server.get_last_log_term() and
+                    request.lastLogIndex >= self.server.get_last_log_index())):
+                    self.server.votedFor = request.candidateId
+                    self.server.currentTerm = request.term
+                    self.server.save_state()
+                    response.voteGranted = True
+                else:
+                    response.voteGranted = False
+
+            return response
+
+    def ClientRequest(self, request, context):
+        with self.server.lock:
+            if self.server.state != 'leader':
+                # Not the leader, return redirect
+                response = raft_pb2.ClientResponseMessage(
+                    success=False,
+                    message="Not the leader",
+                    leaderId=self.server.leaderId if self.server.leaderId is not None else ""
+                )
+                print(f"Server {self.server.sid} is not the leader. Redirecting to {self.server.leaderId}")
+                return response
+            else:
+                # Leader: Append the command to the log and start replication
+                print(f"Leader {self.server.sid} received ClientRequest with command: {request.command}")
+                entry = {'term': self.server.currentTerm, 'command': request.command}
+                self.server.log.append(entry)
+                self.server.save_state()
+                # Start replication (send AppendEntries to followers)
+                self.server.send_append_entries()
+                response = raft_pb2.ClientResponseMessage(
+                    success=True,
+                    message="Command accepted",
+                    leaderId=""
+                )
+                return response
+
+def run_server(sid: str, self_address: str, peer_addresses: str):
+    peer_list = peer_addresses.split(',')
+    server = RaftServer(sid, self_address, peer_list)
     server.start()
 
     # Register signal handlers
