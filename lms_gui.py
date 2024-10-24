@@ -451,7 +451,7 @@ def view_queries_and_replies_instructor():
                                 content=reply_content
                             ), metadata=metadata)
                             st.success(f"Posted Reply ID: {reply.id}")
-                            # st.experimental_rerun()
+                            # st.rerun()
                         else:
                             st.warning("Reply cannot be empty.")
     except grpc.RpcError as e:
@@ -479,7 +479,7 @@ def view_queries_and_replies_instructor():
 #                             content=reply_content
 #                         ), metadata=metadata)
 #                         st.success(f"Posted Reply ID: {reply.id}")
-#                         # st.experimental_rerun()
+#                         # st.rerun()
 #                     else:
 #                         st.warning("Reply cannot be empty.")
 #     except grpc.RpcError as e:

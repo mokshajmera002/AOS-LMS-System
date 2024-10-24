@@ -41,6 +41,7 @@ class RaftServer():
         self.matchIndex = {}  # matchIndex for each follower
 
         # Election timer reset event
+        self.election_timer_timeout = random.uniform(0.5, 0.8)
         self.election_reset_event = threading.Event()
         self.lock = threading.RLock()  # Use reentrant lock to prevent deadlock
 
@@ -60,13 +61,13 @@ class RaftServer():
         while True:
             if self.state == 'leader':
                 self.send_append_entries()
-                time.sleep(0.1)
+                time.sleep(0.2)
             else:
-                time.sleep(0.1)
+                time.sleep(0.2)
 
     def election_timer(self):
         while True:
-            timeout = random.uniform(0.15, 0.30)
+            timeout = self.election_timer_timeout
             event_is_set = self.election_reset_event.wait(timeout)
             if event_is_set:
                 self.election_reset_event.clear()
