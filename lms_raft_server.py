@@ -47,7 +47,7 @@ class LMSService(lms_pb2_grpc.LMSServicer):
                             description TEXT,
                             type INTEGER,
                             filename TEXT,
-                            filepath TEXT,
+                            content BLOB,
                             timestamp TEXT
                         )''')
         # Solutions table
@@ -56,7 +56,7 @@ class LMSService(lms_pb2_grpc.LMSServicer):
                             post_id INTEGER,
                             student_id INTEGER,
                             filename TEXT,
-                            filepath TEXT,
+                            content BLOB,
                             timestamp TEXT,
                             grade REAL,
                             feedback TEXT
@@ -133,7 +133,7 @@ class LMSService(lms_pb2_grpc.LMSServicer):
         payload = self.authenticate(context)
         if not payload:
             return lms_pb2.UserResponse()
-        if payload['role'] != lms_pb2.ADMIN:
+        if context is not None and payload['role'] != lms_pb2.ADMIN:
             context.set_details('Permission denied')
             context.set_code(grpc.StatusCode.PERMISSION_DENIED)
             return lms_pb2.UserResponse()
@@ -158,7 +158,7 @@ class LMSService(lms_pb2_grpc.LMSServicer):
         payload = self.authenticate(context)
         if not payload:
             return lms_pb2.UserList()
-        if payload['role'] != lms_pb2.ADMIN:
+        if context is not None and payload['role'] != lms_pb2.ADMIN:
             context.set_details('Permission denied')
             context.set_code(grpc.StatusCode.PERMISSION_DENIED)
             return lms_pb2.UserList()
@@ -179,24 +179,22 @@ class LMSService(lms_pb2_grpc.LMSServicer):
         payload = self.authenticate(context)
         if not payload:
             return lms_pb2.PostResponse()
-        if payload['role'] != lms_pb2.INSTRUCTOR:
-            context.set_details('Permission denied')
-            context.set_code(grpc.StatusCode.PERMISSION_DENIED)
-            return lms_pb2.PostResponse()
+        
+        if context is not None:
+            # Perform role check
+            if payload['role'] != lms_pb2.INSTRUCTOR:
+                context.set_details('Permission denied')
+                context.set_code(grpc.StatusCode.PERMISSION_DENIED)
+                return lms_pb2.PostResponse()
+        
+        # Proceed with operation
         cursor = self.conn.cursor()
         timestamp = datetime.datetime.utcnow().isoformat()
-        # Save the file if content is provided
+        # Save the file content directly in the database
         filename = request.filename
-        filepath = None
-        if request.content:
-            post_dir = f'posts_{self.sid}'
-            os.makedirs(post_dir, exist_ok=True)
-            unique_filename = f"{int(time.time()*1000)}_{filename}"
-            filepath = os.path.join(post_dir, unique_filename)
-            with open(filepath, 'wb') as f:
-                f.write(request.content)
-        cursor.execute('INSERT INTO posts (title, description, type, filename, filepath, timestamp) VALUES (?, ?, ?, ?, ?, ?)',
-                       (request.title, request.description, request.type, filename, filepath, timestamp))
+        content = request.content  # BLOB data
+        cursor.execute('INSERT INTO posts (title, description, type, filename, content, timestamp) VALUES (?, ?, ?, ?, ?, ?)',
+                       (request.title, request.description, request.type, filename, content, timestamp))
         self.conn.commit()
         post_id = cursor.lastrowid
         post = lms_pb2.Post(
@@ -232,20 +230,16 @@ class LMSService(lms_pb2_grpc.LMSServicer):
         payload = self.authenticate(context)
         if not payload:
             return lms_pb2.PostResponse()
+        
+        if context is not None:
+            # Perform role check if necessary (e.g., any authenticated user can download)
+            pass  # Assuming all authenticated users can download posts
+        
         cursor = self.conn.cursor()
-        cursor.execute('SELECT id, title, description, type, filename, filepath, timestamp FROM posts WHERE id=?', (request.id,))
+        cursor.execute('SELECT id, title, description, type, filename, content, timestamp FROM posts WHERE id=?', (request.id,))
         row = cursor.fetchone()
         if row:
-            # Read the file content from disk if it exists
-            content = b''
-            if row[5]:
-                try:
-                    with open(row[5], 'rb') as f:
-                        content = f.read()
-                except IOError:
-                    context.set_details('File not found')
-                    context.set_code(grpc.StatusCode.NOT_FOUND)
-                    return lms_pb2.PostResponse()
+            content = row[5] if row[5] else b''
             post = lms_pb2.Post(
                 id=row[0],
                 title=row[1],
@@ -257,37 +251,38 @@ class LMSService(lms_pb2_grpc.LMSServicer):
             )
             return lms_pb2.PostResponse(post=post)
         else:
-            context.set_details('Post not found')
-            context.set_code(grpc.StatusCode.NOT_FOUND)
+            if context is not None:
+                context.set_details('Post not found')
+                context.set_code(grpc.StatusCode.NOT_FOUND)
             return lms_pb2.PostResponse()
 
     def UploadSolution(self, request, context):
         payload = self.authenticate(context)
         if not payload:
             return lms_pb2.SolutionResponse()
-        if payload['role'] != lms_pb2.STUDENT:
-            context.set_details('Permission denied')
-            context.set_code(grpc.StatusCode.PERMISSION_DENIED)
-            return lms_pb2.SolutionResponse()
+        
+        if context is not None:
+            # Perform role check
+            if payload['role'] != lms_pb2.STUDENT:
+                context.set_details('Permission denied')
+                context.set_code(grpc.StatusCode.PERMISSION_DENIED)
+                return lms_pb2.SolutionResponse()
+        
         cursor = self.conn.cursor()
         timestamp = datetime.datetime.utcnow().isoformat()
-        # Save the file to disk
-        solution_dir = f'solutions_{self.sid}'
-        os.makedirs(solution_dir, exist_ok=True)
-        unique_filename = f"{int(time.time()*1000)}_{request.filename}"
-        filepath = os.path.join(solution_dir, unique_filename)
-        with open(filepath, 'wb') as f:
-            f.write(request.content)
-        cursor.execute('''INSERT INTO solutions (post_id, student_id, filename, filepath, timestamp)
+        # Save the file content directly in the database
+        filename = request.filename
+        content = request.content  # BLOB data
+        cursor.execute('''INSERT INTO solutions (post_id, student_id, filename, content, timestamp)
                           VALUES (?, ?, ?, ?, ?)''',
-                       (request.post_id, payload['user_id'], request.filename, filepath, timestamp))
+                       (request.post_id, payload['user_id'], filename, content, timestamp))
         self.conn.commit()
         solution_id = cursor.lastrowid
         solution = lms_pb2.Solution(
             id=solution_id,
             post_id=request.post_id,
             student_id=payload['user_id'],
-            filename=request.filename,
+            filename=filename,
             timestamp=timestamp,
             grade=0.0
         )
@@ -297,12 +292,12 @@ class LMSService(lms_pb2_grpc.LMSServicer):
         payload = self.authenticate(context)
         if not payload:
             return lms_pb2.SolutionList()
-        if payload['role'] != lms_pb2.INSTRUCTOR:
+        if context is not None and payload['role'] != lms_pb2.INSTRUCTOR:
             context.set_details('Permission denied')
             context.set_code(grpc.StatusCode.PERMISSION_DENIED)
             return lms_pb2.SolutionList()
         cursor = self.conn.cursor()
-        cursor.execute('''SELECT id, post_id, student_id, filename, filepath, timestamp, grade
+        cursor.execute('''SELECT id, post_id, student_id, filename, content, timestamp, grade
                           FROM solutions WHERE post_id=?''', (request.id,))
         solutions = []
         for row in cursor.fetchall():
@@ -321,22 +316,19 @@ class LMSService(lms_pb2_grpc.LMSServicer):
         payload = self.authenticate(context)
         if not payload:
             return lms_pb2.SolutionResponse()
-        if payload['role'] != lms_pb2.INSTRUCTOR:
-            context.set_details('Permission denied')
-            context.set_code(grpc.StatusCode.PERMISSION_DENIED)
-            return lms_pb2.SolutionResponse()
+        
+        if context is not None:
+            # Perform role check
+            if payload['role'] != lms_pb2.INSTRUCTOR:
+                context.set_details('Permission denied')
+                context.set_code(grpc.StatusCode.PERMISSION_DENIED)
+                return lms_pb2.SolutionResponse()
+        
         cursor = self.conn.cursor()
-        cursor.execute('SELECT id, post_id, student_id, filename, filepath, timestamp, grade FROM solutions WHERE id=?', (request.id,))
+        cursor.execute('SELECT id, post_id, student_id, filename, content, timestamp, grade FROM solutions WHERE id=?', (request.id,))
         row = cursor.fetchone()
         if row:
-            # Read the file content from disk
-            try:
-                with open(row[4], 'rb') as f:
-                    content = f.read()
-            except IOError:
-                context.set_details('File not found')
-                context.set_code(grpc.StatusCode.NOT_FOUND)
-                return lms_pb2.SolutionResponse()
+            content = row[4] if row[4] else b''
             solution = lms_pb2.Solution(
                 id=row[0],
                 post_id=row[1],
@@ -348,24 +340,28 @@ class LMSService(lms_pb2_grpc.LMSServicer):
             )
             return lms_pb2.SolutionResponse(solution=solution)
         else:
-            context.set_details('Solution not found')
-            context.set_code(grpc.StatusCode.NOT_FOUND)
+            if context is not None:
+                context.set_details('Solution not found')
+                context.set_code(grpc.StatusCode.NOT_FOUND)
             return lms_pb2.SolutionResponse()
 
     def AssignGrade(self, request, context):
         payload = self.authenticate(context)
         if not payload:
             return lms_pb2.SolutionResponse()
-        if payload['role'] != lms_pb2.INSTRUCTOR:
-            context.set_details('Permission denied')
-            context.set_code(grpc.StatusCode.PERMISSION_DENIED)
-            return lms_pb2.SolutionResponse()
+        if context is not None:
+            # Perform role check
+            if payload['role'] != lms_pb2.INSTRUCTOR:
+                context.set_details('Permission denied')
+                context.set_code(grpc.StatusCode.PERMISSION_DENIED)
+                return lms_pb2.SolutionResponse()
+        
         cursor = self.conn.cursor()
         # Update the grade for the specified solution
         cursor.execute('UPDATE solutions SET grade=? WHERE id=?', (request.grade, request.solution_id))
         self.conn.commit()
         # Retrieve the updated solution
-        cursor.execute('SELECT id, post_id, student_id, filename, filepath, timestamp, grade FROM solutions WHERE id=?', (request.solution_id,))
+        cursor.execute('SELECT id, post_id, student_id, filename, content, timestamp, grade FROM solutions WHERE id=?', (request.solution_id,))
         row = cursor.fetchone()
         if row:
             solution = lms_pb2.Solution(
@@ -378,20 +374,24 @@ class LMSService(lms_pb2_grpc.LMSServicer):
             )
             return lms_pb2.SolutionResponse(solution=solution)
         else:
-            context.set_details('Solution not found')
-            context.set_code(grpc.StatusCode.NOT_FOUND)
+            if context is not None:
+                context.set_details('Solution not found')
+                context.set_code(grpc.StatusCode.NOT_FOUND)
             return lms_pb2.SolutionResponse()
 
     def ViewGrades(self, request, context):
         payload = self.authenticate(context)
         if not payload:
             return lms_pb2.SolutionList()
-        if payload['role'] != lms_pb2.STUDENT:
-            context.set_details('Permission denied')
-            context.set_code(grpc.StatusCode.PERMISSION_DENIED)
-            return lms_pb2.SolutionList()
+        if context is not None:
+            # Perform role check
+            if payload['role'] != lms_pb2.STUDENT:
+                context.set_details('Permission denied')
+                context.set_code(grpc.StatusCode.PERMISSION_DENIED)
+                return lms_pb2.SolutionList()
+        
         cursor = self.conn.cursor()
-        cursor.execute('''SELECT id, post_id, student_id, filename, filepath, timestamp, grade, feedback
+        cursor.execute('''SELECT id, post_id, student_id, filename, content, timestamp, grade, feedback
                           FROM solutions WHERE student_id=?''', (payload['user_id'],))
         solutions = []
         for row in cursor.fetchall():
@@ -411,10 +411,13 @@ class LMSService(lms_pb2_grpc.LMSServicer):
         payload = self.authenticate(context)
         if not payload:
             return lms_pb2.Query()
-        if payload['role'] != lms_pb2.STUDENT:
-            context.set_details('Permission denied')
-            context.set_code(grpc.StatusCode.PERMISSION_DENIED)
-            return lms_pb2.Query()
+        if context is not None:
+            # Perform role check
+            if payload['role'] != lms_pb2.STUDENT:
+                context.set_details('Permission denied')
+                context.set_code(grpc.StatusCode.PERMISSION_DENIED)
+                return lms_pb2.Query()
+        
         cursor = self.conn.cursor()
         timestamp = datetime.datetime.utcnow().isoformat()
 
@@ -462,10 +465,13 @@ class LMSService(lms_pb2_grpc.LMSServicer):
         payload = self.authenticate(context)
         if not payload:
             return lms_pb2.Reply()
-        if payload['role'] not in [lms_pb2.INSTRUCTOR, lms_pb2.ADMIN]:
-            context.set_details('Permission denied')
-            context.set_code(grpc.StatusCode.PERMISSION_DENIED)
-            return lms_pb2.Reply()
+        if context is not None:
+            # Perform role check
+            if payload['role'] not in [lms_pb2.INSTRUCTOR, lms_pb2.ADMIN]:
+                context.set_details('Permission denied')
+                context.set_code(grpc.StatusCode.PERMISSION_DENIED)
+                return lms_pb2.Reply()
+        
         cursor = self.conn.cursor()
         timestamp = datetime.datetime.utcnow().isoformat()
         cursor.execute(
@@ -489,7 +495,10 @@ class LMSService(lms_pb2_grpc.LMSServicer):
             return lms_pb2.ReplyList()
         cursor = self.conn.cursor()
         cursor.execute(
-            'SELECT replies.id, replies.query_id, replies.user_id, replies.content, replies.timestamp, users.username FROM replies, users WHERE query_id=? and replies.user_id=users.id',
+            '''SELECT replies.id, replies.query_id, replies.user_id, replies.content, replies.timestamp, users.username 
+               FROM replies 
+               JOIN users ON replies.user_id = users.id 
+               WHERE query_id=?''',
             (request.id,)
         )
         replies = []
@@ -509,16 +518,19 @@ class LMSService(lms_pb2_grpc.LMSServicer):
         payload = self.authenticate(context)
         if not payload:
             return lms_pb2.SolutionResponse()
-        if payload['role'] != lms_pb2.INSTRUCTOR:
-            context.set_details('Permission denied')
-            context.set_code(grpc.StatusCode.PERMISSION_DENIED)
-            return lms_pb2.SolutionResponse()
+        if context is not None:
+            # Perform role check
+            if payload['role'] != lms_pb2.INSTRUCTOR:
+                context.set_details('Permission denied')
+                context.set_code(grpc.StatusCode.PERMISSION_DENIED)
+                return lms_pb2.SolutionResponse()
+        
         cursor = self.conn.cursor()
         # Update the feedback for the specified solution
         cursor.execute('UPDATE solutions SET feedback=? WHERE id=?', (request.feedback, request.solution_id))
         self.conn.commit()
         # Retrieve the updated solution
-        cursor.execute('SELECT id, post_id, student_id, filename, filepath, timestamp, grade, feedback FROM solutions WHERE id=?', (request.solution_id,))
+        cursor.execute('SELECT id, post_id, student_id, filename, content, timestamp, grade, feedback FROM solutions WHERE id=?', (request.solution_id,))
         row = cursor.fetchone()
         if row:
             solution = lms_pb2.Solution(
@@ -532,20 +544,24 @@ class LMSService(lms_pb2_grpc.LMSServicer):
             )
             return lms_pb2.SolutionResponse(solution=solution)
         else:
-            context.set_details('Solution not found')
-            context.set_code(grpc.StatusCode.NOT_FOUND)
+            if context is not None:
+                context.set_details('Solution not found')
+                context.set_code(grpc.StatusCode.NOT_FOUND)
             return lms_pb2.SolutionResponse()
     
     def GetAllGrades(self, request, context):
         payload = self.authenticate(context)
         if not payload:
             return lms_pb2.SolutionList()
-        if payload['role'] != lms_pb2.INSTRUCTOR:
-            context.set_details('Permission denied')
-            context.set_code(grpc.StatusCode.PERMISSION_DENIED)
-            return lms_pb2.SolutionList()
+        if context is not None:
+            # Perform role check
+            if payload['role'] != lms_pb2.INSTRUCTOR:
+                context.set_details('Permission denied')
+                context.set_code(grpc.StatusCode.PERMISSION_DENIED)
+                return lms_pb2.SolutionList()
+        
         cursor = self.conn.cursor()
-        cursor.execute('SELECT id, post_id, student_id, filename, filepath, timestamp, grade, feedback FROM solutions')
+        cursor.execute('SELECT id, post_id, student_id, filename, content, timestamp, grade, feedback FROM solutions')
         solutions = []
         for row in cursor.fetchall():
             solution = lms_pb2.Solution(
@@ -578,7 +594,7 @@ class RaftServer():
         self.votedFor = None
         self.state = 'follower'
         self.leaderId = None
-        self.peers = [addr for addr in peer_addresses if addr != self.socket_address]
+        self.peers = [addr for addr in peer_addresses.split(',') if addr != self.socket_address]
 
         # Log and State Machine
         self.log = []  # List of log entries
@@ -699,7 +715,6 @@ class RaftServer():
                 except Exception as e:
                     print(f"Leader {self.sid} failed to send AppendEntries to {peer}: {e}")
                     break  # Exit the loop and retry later
-
 
     def start_election(self):
         with self.lock:
@@ -937,8 +952,7 @@ class RaftService(raft_pb2_grpc.RaftServicer):
                 return response
 
 def run_server(sid: str, self_address: str, peer_addresses: str):
-    peer_list = peer_addresses.split(',')
-    server = RaftServer(sid, self_address, peer_list)
+    server = RaftServer(sid, self_address, peer_addresses)
     server.start()
 
     # Register signal handlers
