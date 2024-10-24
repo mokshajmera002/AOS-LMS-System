@@ -18,18 +18,22 @@ import raft_pb2
 import raft_pb2_grpc
 import lms_pb2
 import lms_pb2_grpc
+import llm_server_pb2
+import llm_server_pb2_grpc
 
 # Constants for JWT
 JWT_SECRET = 'software_project_management'
 JWT_ALGORITHM = 'HS256'
 
 class LMSService(lms_pb2_grpc.LMSServicer):
-    def __init__(self, sid):
+    def __init__(self, sid, llm_address=None):
         # Initialize LMS database and other necessary components
         self.sid = sid
         self.conn = sqlite3.connect(f'LMS_DATABASE_{self.sid}.db', check_same_thread=False)
         self.create_tables()
         self.create_default_admin()
+        self.llm_server = llm_address
+        
 
     def create_tables(self):
         cursor = self.conn.cursor()
@@ -423,8 +427,7 @@ class LMSService(lms_pb2_grpc.LMSServicer):
 
         llm_response = ''
         if request.target == lms_pb2.LLM:
-            # Generate dummy LLM response
-            llm_response = self.generate_dummy_llm_response(request.content)
+            llm_response = self.generate_llm_response(request.content)
 
         cursor.execute(
             'INSERT INTO queries (student_id, content, timestamp, target, llm_response) VALUES (?, ?, ?, ?, ?)',
@@ -576,17 +579,28 @@ class LMSService(lms_pb2_grpc.LMSServicer):
             solutions.append(solution)
         return lms_pb2.SolutionList(solutions=solutions)
     
-    def generate_dummy_llm_response(self, content):
-        # Temporary dummy function to simulate LLM response
-        return "This is a simulated response from the LLM for your query: " + content
+    def generate_llm_response(self, content):
+        response = "This is a simulated response from the LLM for your query: " + content
+        if self.llm_server:
+            with grpc.insecure_channel(self.llm_server) as channel:
+                llm_stub = llm_server_pb2_grpc.LLMChatStub(channel)
+                query = llm_server_pb2.QueryRequest(
+                    query_id = 1,
+                    message = content
+                )
+                response = llm_stub.Query(query)
+        return response
 
 class RaftServer():
-    def __init__(self, sid, self_address, peer_addresses):
+    def __init__(self, sid, self_address, peer_addresses, llm_address):
         self.sid = int(sid)
         self.socket_address = self_address
         self.server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
+        self.lms_service = LMSService(self.sid, llm_address)
+
         raft_pb2_grpc.add_RaftServicer_to_server(RaftService(self), self.server)
-        lms_pb2_grpc.add_LMSServicer_to_server(LMSService(self.sid), self.server)
+        lms_pb2_grpc.add_LMSServicer_to_server(self.lms_service, self.server)
+        
         self.server.add_insecure_port(self.socket_address)
 
         # State variables
@@ -600,9 +614,6 @@ class RaftServer():
         self.log = []  # List of log entries
         self.commitIndex = 0
         self.lastApplied = 0
-
-        # LMS Service instance
-        self.lms_service = LMSService(self.sid)
 
         # Persistent state
         self.state_file = f"raft_state_{self.sid}.pkl"
@@ -951,8 +962,8 @@ class RaftService(raft_pb2_grpc.RaftServicer):
                 )
                 return response
 
-def run_server(sid: str, self_address: str, peer_addresses: str):
-    server = RaftServer(sid, self_address, peer_addresses)
+def run_server(sid: str, self: str, peers: str, llm: str=None):
+    server = RaftServer(sid, self, peers, llm)
     server.start()
 
     # Register signal handlers

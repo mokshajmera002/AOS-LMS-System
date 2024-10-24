@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+message QueryRequest {
+    int32 query_id = 1;
+    string message = 2; 
+}
+
+message QueryResponse {
+    int32 query_id = 1;
+    string message = 2;
+}
+
+service LLMChat {
+    rpc Query(QueryRequest) returns (QueryResponse);
+}
