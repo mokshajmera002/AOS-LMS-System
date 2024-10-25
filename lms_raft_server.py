@@ -34,10 +34,6 @@ class LMSService(lms_pb2_grpc.LMSServicer):
         self.create_default_admin()
         self.llm_server = llm_address
         
-        
-
-
-
     def create_tables(self):
         cursor = self.conn.cursor()
         # Users table
@@ -114,7 +110,6 @@ class LMSService(lms_pb2_grpc.LMSServicer):
             context.set_details('Invalid token')
             context.set_code(grpc.StatusCode.UNAUTHENTICATED)
             return None
-
 
     def Login(self, request, context):
         cursor = self.conn.cursor()

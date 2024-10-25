@@ -1,3 +1,4 @@
+import fire
 import grpc
 import raft_pb2
 import raft_pb2_grpc
@@ -47,42 +48,51 @@ class RaftClientServer:
 
     def send_command(self, lms_method, lms_request):
         with self.lock:
-            if self.leader_id is None:
-                found = self.find_leader()
-                if not found:
-                    print("Leader not found in the cluster.")
-                    return None
+            retries = 3
+            while retries > 0:
+                if self.leader_id is None:
+                    found = self.find_leader()
+                    if not found:
+                        print("Leader not found in the cluster.")
+                        time.sleep(1)
+                        retries -= 1
+                        continue
 
-            try:
-                with grpc.insecure_channel(self.leader_id) as channel:
-                    raft_stub = raft_pb2_grpc.RaftStub(channel)
-                    # Serialize the LMS request
-                    command_data = {
-                        'method': lms_method,
-                        'request': lms_request
-                    }
-                    command_bytes = pickle.dumps(command_data)
-                    command_str = base64.b64encode(command_bytes).decode('utf-8')
-                    raft_request = raft_pb2.ClientRequestMessage(command=command_str)
-                    raft_response = raft_stub.ClientRequest(raft_request, timeout=5)
-                    if raft_response.success:
-                        print(f"Command '{lms_method}' successfully replicated to the cluster.")
-                        # After replication, directly call the LMS method on the leader
-                        lms_response = self.call_lms_method(lms_method, lms_request)
-                        return lms_response
-                    else:
-                        if raft_response.leaderId:
-                            self.leader_id = raft_response.leaderId
-                            print(f"Leader changed to: {self.leader_id}. Retrying command.")
-                            return self.send_command(lms_method, lms_request)
+                try:
+                    with grpc.insecure_channel(self.leader_id) as channel:
+                        raft_stub = raft_pb2_grpc.RaftStub(channel)
+                        # Serialize the LMS request
+                        command_data = {
+                            'method': lms_method,
+                            'request': lms_request
+                        }
+                        command_bytes = pickle.dumps(command_data)
+                        command_str = base64.b64encode(command_bytes).decode('utf-8')
+                        raft_request = raft_pb2.ClientRequestMessage(command=command_str)
+                        raft_response = raft_stub.ClientRequest(raft_request, timeout=5)
+                        if raft_response.success:
+                            print(f"Command '{lms_method}' successfully replicated to the cluster.")
+                            # After replication, directly call the LMS method on the leader
+                            lms_response = self.call_lms_method(lms_method, lms_request)
+                            return lms_response
                         else:
-                            self.leader_id = None
-                            print("Leader information not provided. Retrying leader discovery.")
-                            return self.send_command(lms_method, lms_request)
-            except Exception as e:
-                print(f"Failed to send command to leader {self.leader_id}: {e}")
-                self.leader_id = None
-                return self.send_command(lms_method, lms_request)
+                            if raft_response.leaderId:
+                                self.leader_id = raft_response.leaderId
+                                print(f"Leader changed to: {self.leader_id}. Retrying command.")
+                            else:
+                                self.leader_id = None
+                                print("Leader information not provided. Retrying leader discovery.")
+                    retries -= 1
+                except grpc.RpcError as e:
+                    print(f"Failed to send command to leader {self.leader_id}: {e}")
+                    self.leader_id = None
+                    retries -= 1
+                except Exception as e:
+                    print(f"Unexpected error: {e}")
+                    self.leader_id = None
+                    retries -= 1
+            print("Exceeded maximum retries. Command failed.")
+            return None
 
     def call_lms_method(self, lms_method, lms_request):
         # Directly call the LMS service on the leader to get the response
@@ -100,8 +110,8 @@ class RaftClientServer:
             print(f"Failed to get LMS response from leader {self.leader_id}: {e}")
             return None
 
-def run_raft_client():
-    servers = [f"127.0.0.1:5000{i}" for i in range(3)]
+def run_raft_client(servers:str):
+    servers = [addr for addr in servers.split(',')]
     raft_client_server = RaftClientServer(servers)
 
     while True:
@@ -227,10 +237,15 @@ def student_menu(raft_client_server, user_id):
             if not query_content.strip():
                 print("Query cannot be empty.")
                 continue
+            target_choice = input("Target LLM? (y/n): ")
+            if target_choice.lower() == 'y':
+                target = lms_pb2.LLM
+            else:
+                target = lms_pb2.PROFESSOR
             lms_request = lms_pb2.QueryRequest(
                 student_id=user_id,
                 content=query_content,
-                target=lms_pb2.PROFESSOR  # or lms_pb2.LLM depending on your choice
+                target=target
             )
             lms_method = 'PostQuery'
             response = raft_client_server.send_command(lms_method, lms_request)
@@ -454,4 +469,7 @@ def admin_menu(raft_client_server, user_id):
             print("Invalid choice.")
 
 if __name__ == '__main__':
-    run_raft_client()
+    try:
+        fire.Fire(run_raft_client)
+    except Exception as e:
+        print(e)
