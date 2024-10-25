@@ -7,7 +7,6 @@ import lms_pb2
 import lms_pb2_grpc
 import raft_pb2
 import raft_pb2_grpc
-import os
 import jwt
 from jwt import InvalidTokenError
 import base64
@@ -15,7 +14,6 @@ import pickle
 import threading
 
 # Constants
-SERVERS = [f"127.0.0.1:5000{i}" for i in range(3)]  # List of Raft server addresses
 JWT_SECRET = 'software_project_management'
 JWT_ALGORITHM = 'HS256'
 
@@ -107,16 +105,21 @@ class RaftClientServer:
 
 def main():
     st.title("LMS System")
+    raft_client_server = None
 
-    raft_client_server = RaftClientServer(SERVERS)
-
+    if 'servers' not in st.session_state:
+        st.session_state.servers = None
     if 'token' not in st.session_state:
         st.session_state.token = None
         st.session_state.role = None
         st.session_state.user_id = None
 
-    if raft_client_server.token:
-        st.session_state.token = raft_client_server.token
+    if st.session_state.servers is None:
+        server_input_page()
+    else:
+        raft_client_server = RaftClientServer(st.session_state.servers)
+        if raft_client_server.token:
+            st.session_state.token = raft_client_server.token
 
     if st.session_state.token:
         # User is logged in
@@ -144,7 +147,34 @@ def main():
         else:
             st.error("Unknown role.")
     else:
-        login(raft_client_server)
+        if raft_client_server:
+            login(raft_client_server)
+
+def server_input_page():
+    st.subheader("Configure Raft Servers")
+    server_addresses = st.text_area("Enter server addresses separated by commas (e.g., 127.0.0.1:50000,127.0.0.1:50001)", height=100)
+    if st.button("Submit"):
+        servers = [addr.strip() for addr in server_addresses.split(',') if addr.strip()]
+        if not servers:
+            st.error("Please enter at least one server address.")
+            return
+        # Verify connections
+        valid_servers = []
+        for server in servers:
+            try:
+                with grpc.insecure_channel(server) as channel:
+                    stub = raft_pb2_grpc.RaftStub(channel)
+                    request = raft_pb2.ClientRequestMessage(command="")
+                    stub.ClientRequest(request, timeout=2)
+                valid_servers.append(server)
+            except:
+                st.warning(f"Cannot connect to server: {server}")
+        if valid_servers:
+            st.session_state.servers = valid_servers
+            st.success("Server addresses validated and saved.")
+            st.rerun()
+        else:
+            st.error("No valid servers found. Please check the addresses and try again.")
 
 def login(raft_client_server):
     st.subheader("Login")
@@ -506,10 +536,17 @@ def view_all_students_grades(raft_client_server):
     if response:
         if not response.solutions:
             st.info("No grades available.")
+        user_data = []
         for sol in response.solutions:
-            st.write(f"**Student {sol.student_id} - Assignment {sol.post_id} - Grade: {sol.grade}**")
-            if sol.feedback:
-                st.write(f"**Feedback:** {sol.feedback}")
+            user_data.append({
+                "Solution ID": sol.id,
+                "Assignment ID": sol.post_id,
+                "Student ID": sol.student_id,
+                "Grade": sol.grade,
+                "Feedback": sol.feedback if sol.feedback else "N/A"
+            })
+        df = pd.DataFrame(user_data)
+        st.dataframe(df)
     else:
         st.error("Failed to retrieve grades.")
 
