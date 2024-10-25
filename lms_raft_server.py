@@ -1,4 +1,4 @@
-import sys
+import sys 
 from concurrent import futures
 import time
 import fire
@@ -33,7 +33,7 @@ class LMSService(lms_pb2_grpc.LMSServicer):
         self.create_tables()
         self.create_default_admin()
         self.llm_server = llm_address
-        
+    
     def create_tables(self):
         cursor = self.conn.cursor()
         # Users table
@@ -609,12 +609,13 @@ class LMSService(lms_pb2_grpc.LMSServicer):
                         query_id=query_id,
                         message=content
                     )
-                    response = llm_stub.Query(query).message
+                    llm_response = llm_stub.Query(query)
+                    response = getattr(llm_response, 'message', "No response field found.")
             return response
         except Exception as e:
             print(f"Error communicating with LLM server: {e}")
             return "Failed to generate LLM response."
-
+    
     def generate_and_update_llm_response(self, query_id, content):
         llm_response = self.generate_llm_response(query_id, content)
         print(f"----- Completed {query_id}------")
@@ -661,6 +662,9 @@ class RaftServer():
         # Election timer reset event
         self.election_reset_event = threading.Event()
         self.lock = threading.RLock()  # Use reentrant lock to prevent deadlock
+
+        # Condition variable for commit synchronization
+        self.commit_cond = threading.Condition(self.lock)
 
     def isLeader(self):
         return self.state == 'leader'
@@ -857,6 +861,9 @@ class RaftServer():
             except Exception as e:
                 print(f"Server {self.sid} failed to apply command: {e}")
         self.save_state()
+        # Notify all waiting threads that commitIndex has been updated
+        with self.commit_cond:
+            self.commit_cond.notify_all()
 
     def save_state(self):
         with self.lock:
@@ -988,8 +995,13 @@ class RaftService(raft_pb2_grpc.RaftServicer):
                 entry = {'term': self.server.currentTerm, 'command': request.command}
                 self.server.log.append(entry)
                 self.server.save_state()
+                entry_index = len(self.server.log)
                 # Start replication (send AppendEntries to followers)
                 self.server.send_append_entries()
+                # Wait for the entry to be committed
+                with self.server.commit_cond:
+                    while self.server.commitIndex < entry_index:
+                        self.server.commit_cond.wait()
                 response = raft_pb2.ClientResponseMessage(
                     success=True,
                     message="Command accepted",

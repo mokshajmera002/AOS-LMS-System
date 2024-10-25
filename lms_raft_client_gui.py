@@ -1,5 +1,6 @@
 # lms_raft_client_gui.py
 
+import time
 import streamlit as st
 import grpc
 import pandas as pd
@@ -25,7 +26,7 @@ class RaftClientServer:
         self.token = None  # Authentication token
 
     def find_leader(self):
-        for server_address in self.servers:
+        for index, server_address in enumerate(self.servers):
             try:
                 with grpc.insecure_channel(server_address) as channel:
                     stub = raft_pb2_grpc.RaftStub(channel)
@@ -34,12 +35,12 @@ class RaftClientServer:
                     response = stub.ClientRequest(request, timeout=1)
                     if response.success:
                         # This server is the leader
-                        self.leader_id = server_address
+                        self.leader_id = index
                         print(f"Leader found: {self.leader_id}")
                         return True
                     else:
                         if response.leaderId:
-                            self.leader_id = response.leaderId
+                            self.leader_id = int(response.leaderId)
                             print(f"Redirecting to leader at: {self.leader_id}")
                             return True
                         else:
@@ -57,7 +58,7 @@ class RaftClientServer:
                     return None
 
             try:
-                with grpc.insecure_channel(self.leader_id) as channel:
+                with grpc.insecure_channel(self.servers[self.leader_id]) as channel:
                     raft_stub = raft_pb2_grpc.RaftStub(channel)
                     # Serialize the LMS request
                     command_data = {
@@ -90,7 +91,7 @@ class RaftClientServer:
     def call_lms_method(self, lms_method, lms_request):
         # Directly call the LMS service on the leader to get the response
         try:
-            with grpc.insecure_channel(self.leader_id) as channel:
+            with grpc.insecure_channel(self.servers[self.leader_id]) as channel:
                 stub = lms_pb2_grpc.LMSStub(channel)
                 # Prepare metadata if token is available
                 metadata = []
@@ -152,7 +153,7 @@ def main():
 
 def server_input_page():
     st.subheader("Configure Raft Servers")
-    server_addresses = st.text_area("Enter server addresses separated by commas (e.g., 127.0.0.1:50000,127.0.0.1:50001)", height=100)
+    server_addresses = st.text_area("Enter server addresses separated by commas (e.g., 127.0.0.1:50000,127.0.0.1:50001)", height=100, value="127.0.0.1:50000,127.0.0.1:50001,127.0.0.1:50002")
     if st.button("Submit"):
         servers = [addr.strip() for addr in server_addresses.split(',') if addr.strip()]
         if not servers:
@@ -167,11 +168,13 @@ def server_input_page():
                     request = raft_pb2.ClientRequestMessage(command="")
                     stub.ClientRequest(request, timeout=2)
                 valid_servers.append(server)
+                st.success(f"Connected to server: {server}")
             except:
                 st.warning(f"Cannot connect to server: {server}")
         if valid_servers:
             st.session_state.servers = valid_servers
             st.success("Server addresses validated and saved.")
+            time.sleep(1)
             st.rerun()
         else:
             st.error("No valid servers found. Please check the addresses and try again.")
@@ -251,14 +254,25 @@ def admin_menu(raft_client_server):
     elif choice == "Logout":
         logout(raft_client_server)
 
+def deduplicate_posts(post_list):
+    final_posts = []
+    for post in post_list:
+        for _ep in final_posts:
+            if _ep.title == post.title:
+                if lms_pb2.PostType.Name(post.type) == lms_pb2.PostType.Name(_ep.type):
+                    break
+        else:
+            final_posts.append(post)
+    return final_posts
+
 # Common Functions
 def view_posts(raft_client_server):
     st.subheader("Posts")
     lms_request = lms_pb2.Empty()
     lms_method = 'GetPosts'
     response = raft_client_server.send_command(lms_method, lms_request)
-    if response:
-        for post in response.posts:
+    if response:    
+        for post in deduplicate_posts(response.posts):
             post_type = lms_pb2.PostType.Name(post.type)
             with st.expander(f"{post.title} (Type: {post_type})"):
                 st.write(f"**Description:** {post.description}")
@@ -272,7 +286,7 @@ def download_post(raft_client_server):
     lms_method = 'GetPosts'
     response = raft_client_server.send_command(lms_method, lms_request)
     if response:
-        post_options = {f"{post.id}: {post.title}": post.id for post in response.posts}
+        post_options = {f"{post.id}: {post.title}": post.id for post in deduplicate_posts(response.posts)}
         selected_post = st.selectbox("Select Post to Download", list(post_options.keys()))
         if st.button("Download"):
             post_id = post_options[selected_post]
@@ -296,8 +310,8 @@ def upload_solution(raft_client_server):
     lms_method = 'GetPosts'
     response = raft_client_server.send_command(lms_method, lms_request)
     if response:
-        assignment_posts = [post for post in response.posts if post.type == lms_pb2.ASSIGNMENT]
-        post_options = {f"{post.id}: {post.title}": post.id for post in assignment_posts}
+        assignment_posts = [post for post in deduplicate_posts(response.posts) if post.type == lms_pb2.ASSIGNMENT]
+        post_options = {f"{post.id}: {post.title}": post.id for post in deduplicate_posts(assignment_posts)}
         if not post_options:
             st.info("No assignments available.")
             return
@@ -429,8 +443,8 @@ def download_student_solution(raft_client_server):
     lms_method = 'GetPosts'
     response = raft_client_server.send_command(lms_method, lms_request)
     if response:
-        assignment_posts = [post for post in response.posts if post.type == lms_pb2.ASSIGNMENT]
-        post_options = {f"{post.id}: {post.title}": post.id for post in assignment_posts}
+        assignment_posts = [post for post in deduplicate_posts(response.posts) if post.type == lms_pb2.ASSIGNMENT]
+        post_options = {f"{post.id}: {post.title}": post.id for post in deduplicate_posts(assignment_posts)}
         if not post_options:
             st.info("No assignments available.")
             return
@@ -467,8 +481,8 @@ def assign_grade(raft_client_server):
     lms_method = 'GetPosts'
     response = raft_client_server.send_command(lms_method, lms_request)
     if response:
-        assignment_posts = [post for post in response.posts if post.type == lms_pb2.ASSIGNMENT]
-        post_options = {f"{post.id}: {post.title}": post.id for post in assignment_posts}
+        assignment_posts = [post for post in deduplicate_posts(response.posts) if post.type == lms_pb2.ASSIGNMENT]
+        post_options = {f"{post.id}: {post.title}": post.id for post in deduplicate_posts(assignment_posts)}
         if not post_options:
             st.info("No assignments available.")
             return
@@ -546,6 +560,7 @@ def view_all_students_grades(raft_client_server):
                 "Feedback": sol.feedback if sol.feedback else "N/A"
             })
         df = pd.DataFrame(user_data)
+        df.drop(index=df.index[df['Student ID']==0], inplace=True)
         st.dataframe(df)
     else:
         st.error("Failed to retrieve grades.")
