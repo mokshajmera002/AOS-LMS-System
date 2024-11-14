@@ -5,6 +5,9 @@ Uploads
 *.pkl
 *.db
 
+#moksh custom ignores
+.vscode
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
